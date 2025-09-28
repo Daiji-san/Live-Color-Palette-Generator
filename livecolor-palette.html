@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Environmental Color Palette Generator</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for the palette squares */
+        .color-square {
+            transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+            cursor: pointer;
+            height: 8rem;
+        }
+        .color-square:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 15px rgba(0, 0, 0, 0.2);
+        }
+        /* Style for the video feed to ensure it stays visible but is processed */
+        #video-feed {
+            transform: scaleX(-1); /* Mirror the video feed for a selfie experience */
+            width: 100%;
+            max-height: 400px;
+            object-fit: cover;
+            border-radius: 0.75rem;
+        }
+        /* Hide the processing canvas from view */
+        #processing-canvas {
+            display: none;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen p-4 sm:p-8 font-sans">
+
+    <div class="max-w-4xl mx-auto">
+        <header class="text-center mb-10">
+            <h1 class="text-3xl sm:text-4xl font-extrabold text-indigo-700">Live Environmental Color Palette Generator</h1>
+            <p class="mt-2 text-lg text-gray-600">Analyze your surroundings in real-time using Computer Vision Lite.</p>
+        </header>
+
+        <!-- Main Application Grid -->
+        <div class="bg-white p-6 sm:p-8 rounded-xl shadow-2xl border border-indigo-200">
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <!-- Video Input Section -->
+                <div class="flex flex-col items-center">
+                    <h2 class="text-xl font-semibold mb-3 text-gray-800">1. Live Camera Feed</h2>
+                    <video id="video-feed" autoplay playsinline class="shadow-lg"></video>
+                    <button id="start-button" class="mt-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-6 rounded-lg shadow-md transition duration-150 ease-in-out w-full md:w-auto">
+                        Start Camera Analysis
+                    </button>
+                    <p id="status-message" class="mt-3 text-sm text-red-500 font-medium"></p>
+                </div>
+
+                <!-- Palette Output Section -->
+                <div>
+                    <h2 class="text-xl font-semibold mb-4 text-gray-800">2. Generated Palette (Click to Copy Hex)</h2>
+                    <div id="palette-output" class="space-y-4">
+                        <!-- Palette Squares will be injected here by JavaScript -->
+                        <div class="text-center p-6 text-gray-500 border border-dashed rounded-lg">
+                            Awaiting camera input...
+                        </div>
+                    </div>
+                    <p id="copy-message" class="mt-4 text-sm font-semibold text-green-600 transition-opacity opacity-0">Hex code copied!</p>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Hidden Canvas for Processing -->
+        <canvas id="processing-canvas" width="320" height="240"></canvas>
+    </div>
+
+    <script>
+        const video = document.getElementById('video-feed');
+        const canvas = document.getElementById('processing-canvas');
+        const context = canvas.getContext('2d');
+        const paletteOutput = document.getElementById('palette-output');
+        const startButton = document.getElementById('start-button');
+        const statusMessage = document.getElementById('status-message');
+        const copyMessage = document.getElementById('copy-message');
+
+        let intervalId = null;
+        const NUM_COLORS = 5; // We want the top 5 colors
+        const SAMPLE_POINTS = 500; // Number of pixels to sample for performance
+
+        // --- Utility Functions ---
+
+        /** Converts RGB components (0-255) to a Hexadecimal string. */
+        function rgbToHex(r, g, b) {
+            return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1).toUpperCase();
+        }
+
+        /** Simple luminance check for text color contrast */
+        function getContrastColor(hex) {
+            // Convert hex to RGB
+            const r = parseInt(hex.slice(1, 3), 16);
+            const g = parseInt(hex.slice(3, 5), 16);
+            const b = parseInt(hex.slice(5, 7), 16);
+
+            // Calculate luminance
+            const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+            // Return white for dark backgrounds, black for light backgrounds
+            return luminance > 0.5 ? '#000000' : '#FFFFFF';
+        }
+
+        /** Copies text to clipboard and shows a temporary success message. */
+        function copyToClipboard(text) {
+            try {
+                // Using a fallback for copy command due to iframe security constraints
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+
+                copyMessage.textContent = `${text} copied!`;
+                copyMessage.classList.remove('opacity-0');
+                setTimeout(() => {
+                    copyMessage.classList.add('opacity-0');
+                }, 1500);
+
+            } catch (err) {
+                statusMessage.textContent = 'Failed to copy text. Console error for details.';
+                console.error('Copy command failed: ', err);
+            }
+        }
+
+        /** Renders the color palette elements to the UI. */
+        function renderPalette(colorData) {
+            paletteOutput.innerHTML = ''; // Clear existing palette
+
+            if (colorData.length === 0) {
+                 paletteOutput.innerHTML = '<div class="text-center p-6 text-gray-500 border border-dashed rounded-lg">No colors detected. Point camera towards an object!</div>';
+                 return;
+            }
+
+            colorData.forEach(({ hex, count }) => {
+                const contrastColor = getContrastColor(hex);
+                const paletteItem = document.createElement('div');
+                paletteItem.className = 'color-square rounded-xl shadow-lg flex flex-col items-center justify-center p-3 text-lg font-mono tracking-wider';
+                paletteItem.style.backgroundColor = hex;
+                paletteItem.style.color = contrastColor;
+                paletteItem.textContent = hex;
+
+                // Add click listener to copy the hex code
+                paletteItem.addEventListener('click', () => copyToClipboard(hex));
+
+                // Optional: Show approximate percentage
+                const percentage = ((count / SAMPLE_POINTS) * 100).toFixed(1);
+                const detail = document.createElement('span');
+                detail.className = 'text-xs mt-1 opacity-70';
+                detail.textContent = `(${percentage}% coverage)`;
+                detail.style.color = contrastColor;
+                paletteItem.appendChild(detail);
+
+                paletteOutput.appendChild(paletteItem);
+            });
+        }
+
+        // --- Core Analysis Logic ---
+
+        /**
+         * Analyzes the canvas data to find the dominant colors.
+         * Uses a simple color quantization by grouping similar colors.
+         */
+        function analyzeFrame() {
+            if (video.paused || video.ended) return;
+
+            // 1. Draw video frame onto the hidden canvas
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+
+            const colorCounts = {};
+
+            // 2. Sample pixels and count the occurrence of quantized colors
+            for (let i = 0; i < SAMPLE_POINTS; i++) {
+                // Choose a random pixel index for fast sampling
+                const pixelIndex = Math.floor(Math.random() * (data.length / 4)) * 4;
+
+                const r = data[pixelIndex];
+                const g = data[pixelIndex + 1];
+                const b = data[pixelIndex + 2];
+
+                // Simple Quantization: Group colors into 32-value buckets for similarity
+                // This prevents minor variations (like #FF0001 and #FF0000) from being counted separately.
+                const rQ = Math.floor(r / 32) * 32;
+                const gQ = Math.floor(g / 32) * 32;
+                const bQ = Math.floor(b / 32) * 32;
+
+                const key = `${rQ},${gQ},${bQ}`;
+
+                if (colorCounts[key]) {
+                    colorCounts[key].count++;
+                } else {
+                    colorCounts[key] = { r: r, g: g, b: b, count: 1 };
+                }
+            }
+
+            // 3. Sort and filter the top N colors
+            const sortedColors = Object.values(colorCounts)
+                .sort((a, b) => b.count - a.count)
+                .slice(0, NUM_COLORS);
+
+            // 4. Convert top colors to hex for display
+            const finalPalette = sortedColors.map(c => ({
+                hex: rgbToHex(c.r, c.g, c.b),
+                count: c.count
+            }));
+
+            renderPalette(finalPalette);
+        }
+
+        // --- Camera Setup ---
+
+        /** Initializes the camera stream and starts the analysis loop. */
+        async function startCamera() {
+            startButton.disabled = true;
+            statusMessage.textContent = 'Requesting camera access...';
+
+            try {
+                // Request video stream access (facingMode: 'environment' preferred on mobile, 'user' for selfie)
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    video.play();
+                    // Set canvas size to match video aspect ratio if needed, but keeping fixed for simplicity
+                    statusMessage.textContent = 'Camera stream started. Analyzing environment...';
+                    startButton.style.display = 'none';
+
+                    // Start the analysis loop every 500ms
+                    intervalId = setInterval(analyzeFrame, 500);
+                };
+
+            } catch (err) {
+                console.error("Error accessing media devices: ", err);
+                statusMessage.textContent = 'ERROR: Could not access camera. Please check permissions.';
+                startButton.disabled = false;
+            }
+        }
+
+        // --- Initialization ---
+
+        startButton.addEventListener('click', startCamera);
+
+        // Cleanup on window unload (good practice)
+        window.addEventListener('beforeunload', () => {
+            if (intervalId) {
+                clearInterval(intervalId);
+            }
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(track => track.stop());
+            }
+        });
+
+        // Set initial instructions
+        statusMessage.textContent = 'Press the button above to begin live color analysis.';
+        renderPalette([]); // Initialize with empty/placeholder message
+
+    </script>
+</body>
+</html>
